@@ -1,0 +1,324 @@
+Subject: [PATCH] parallel
+11
+11
+---
+Index: src/CloudlogHelper/Models/HamlibSettings.cs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/CloudlogHelper/Models/HamlibSettings.cs b/src/CloudlogHelper/Models/HamlibSettings.cs
+--- a/src/CloudlogHelper/Models/HamlibSettings.cs	(revision 35093087d82aeaf77c1299e8802bacaf470baeae)
++++ b/src/CloudlogHelper/Models/HamlibSettings.cs	(revision b0aa63445e8c6fd2264dace938948fee6badb824)
+@@ -100,7 +100,9 @@
+             x => x.PollAllowed,
+             x => x.ReportRFPower,
+             x => x.ReportSplitInfo
+-        ).Skip(4).Subscribe(tmp =>
++        ) // fixme some trickly solutions...
++        .SkipUntil(Observable.Timer(TimeSpan.FromMilliseconds(500)))
++        .Subscribe(tmp =>
+         {
+             _isConfChanged = true;
+         }).DisposeWith(_disposable);
+@@ -113,7 +115,9 @@
+             x => x.UseExternalRigctld,
+             x => x.ExternalRigctldHostAddress,
+             x => x.SyncRigInfoAddress
+-        ).Skip(1).Subscribe(_ =>
++        )// fixme some trickly solutions...
++        .SkipUntil(Observable.Timer(TimeSpan.FromMilliseconds(500)))
++        .Subscribe(_ =>
+         {
+             _isConfChanged = true;
+         }).DisposeWith(_disposable);;
+Index: src/CloudlogHelper/Models/OmniRigSettings.cs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/CloudlogHelper/Models/OmniRigSettings.cs b/src/CloudlogHelper/Models/OmniRigSettings.cs
+--- a/src/CloudlogHelper/Models/OmniRigSettings.cs	(revision 35093087d82aeaf77c1299e8802bacaf470baeae)
++++ b/src/CloudlogHelper/Models/OmniRigSettings.cs	(revision b0aa63445e8c6fd2264dace938948fee6badb824)
+@@ -59,7 +59,9 @@
+             x => x.PollAllowed,
+              x=> x.PollInterval,
+             x => x.SyncRigInfoAddress
+-        ).Skip(1).Subscribe(_ =>
++        )
++        .SkipUntil(Observable.Timer(TimeSpan.FromMilliseconds(500)))
++        .Subscribe(_ =>
+         {
+             // Console.WriteLine("Oh seems like sth changed..");
+             _isConfChanged = true;
+Index: src/CloudlogHelper/ViewModels/UserControls/RIGDataGroupboxUserControlViewModel.cs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/CloudlogHelper/ViewModels/UserControls/RIGDataGroupboxUserControlViewModel.cs b/src/CloudlogHelper/ViewModels/UserControls/RIGDataGroupboxUserControlViewModel.cs
+--- a/src/CloudlogHelper/ViewModels/UserControls/RIGDataGroupboxUserControlViewModel.cs	(revision 35093087d82aeaf77c1299e8802bacaf470baeae)
++++ b/src/CloudlogHelper/ViewModels/UserControls/RIGDataGroupboxUserControlViewModel.cs	(revision b0aa63445e8c6fd2264dace938948fee6badb824)
+@@ -62,6 +62,12 @@
+     ///     Semaphore to prevent re-entrant polling
+     /// </summary>
+     private readonly SemaphoreSlim _pollLock = new(1, 1);
++    
++    /// <summary>
++    ///     Semaphore to prevent repeated timer (polling)
++    /// </summary>
++    private readonly SemaphoreSlim _pollTimerLock = new(1, 1);
++    
+ 
+     public RIGDataGroupboxUserControlViewModel()
+     {
+@@ -113,17 +119,12 @@
+         {
+             _cancelSubject.DisposeWith(disposables);
+ 
+-            // Handle settings changes with throttling to avoid excessive restarts
+             MessageBus.Current.Listen<SettingsChanged>()
+-                // .Throttle(TimeSpan.FromMilliseconds(500))
++                .Where(x => x.Part == ChangedPart.RigService)
+                 .Subscribe( x =>
+                 {
+-                    if (x.Part == ChangedPart.NothingJustClosed)
+-                    {
+-                        _createNewTimer().DisposeWith(disposables);
+-                        
+-                        Interlocked.Exchange(ref  _rigConnFailedTimes, 0);
+-                    }
++                    _createNewTimer().DisposeWith(disposables);
++                    Interlocked.Exchange(ref  _rigConnFailedTimes, 0);
+                 })
+                 .DisposeWith(disposables);
+ 
+@@ -408,9 +409,9 @@
+     
+     private IDisposable _createNewTimer()
+     {
+-        ClassLogger.Trace("Creating new rig timer...");
+         _disposeAllTimers();
+-
++        _pollTimerLock.Wait(CancellationToken.None);
++        ClassLogger.Trace("Creating new rig timer.");
+         var timerDisposable = Observable.Defer(() =>
+             {
+                 return Observable.Create<Unit>(observer =>
+@@ -432,6 +433,13 @@
+                                 await HandlePollExceptionAsync(ex);
+                             }
+                         }
++                        else
++                        {
++                            // polling is not enabled - stop this timer immediately.
++                            ClassLogger.Trace("No rig service available - polling timer stopped.");
++                            observer.OnCompleted();
++                            return;
++                        }
+ 
+                         while (!innerCancellationToken.IsCancellationRequested)
+                         {
+@@ -493,6 +501,7 @@
+                     
+                     return Disposable.Create(() =>
+                     {
++                        ClassLogger.Trace("Calling dispose.");
+                         innerCancellation.Cancel();
+                         timerTask.ContinueWith(_ => { }, TaskContinuationOptions.OnlyOnFaulted);
+                     });
+@@ -502,7 +511,8 @@
+             .Finally(() =>
+             {
+                 _resetStatus();
+-                ClassLogger.Trace("Canceling radio timer...");
++                _pollTimerLock.Release();
++                ClassLogger.Trace("Cancelled radio timer.");
+             })
+             .Subscribe(
+                 onNext: _ => { /* Timer tick handled in the observable */ },
+Index: src/CloudlogHelper/App.axaml.cs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/CloudlogHelper/App.axaml.cs b/src/CloudlogHelper/App.axaml.cs
+--- a/src/CloudlogHelper/App.axaml.cs	(revision b0aa63445e8c6fd2264dace938948fee6badb824)
++++ b/src/CloudlogHelper/App.axaml.cs	(revision 07ee1ae2a7e15c9b011de2bf7c6a5dabb08cbfaf)
+@@ -117,10 +117,29 @@
+             if (!typeof(ThirdPartyLogService).IsAssignableFrom(x))
+                 throw new TypeLoadException($"Log service must be assignable to {nameof(ThirdPartyLogService)}");
+             return (ThirdPartyLogService)Activator.CreateInstance(x)!;
+-        });
++        }).ToArray();
++
++        var preinitToken = new CancellationTokenSource();
++        preinitToken.CancelAfter(TimeSpan.FromSeconds(DefaultConfigs.LogServicePreinitTimeoutSec));
++        
++        ClassLogger.Debug("Pre-initing log services");
++        // initialize services at background
++        _ = Task.WhenAll(logServices.Select(x => x.PreInitAsync(preinitToken.Token)))
++            .ContinueWith(ex =>
++            {
++                if (ex.IsFaulted)
++                {
++                    ClassLogger.Error(ex.Exception, "Error while initing logservices.");
++                }
++                else
++                {
++                    ClassLogger.Debug("Pre-initing log services finished successfully.");
++                }
++            }, preinitToken.Token);
++        
+         collection.AddSingleton<IApplicationSettingsService, ApplicationSettingsService>(pr =>
+             ApplicationSettingsService.GenerateApplicationSettingsService(
+-                logServices.ToArray(), _cmdOptions.ReinitSettings, pr.GetRequiredService<IMapper>()
++                logServices, _cmdOptions.ReinitSettings, pr.GetRequiredService<IMapper>()
+             ));
+ 
+         collection.AddSingleton<CommandLineOptions>(p => _cmdOptions);
+Index: src/CloudlogHelper/LogService/LoTWThirdPartyLogService.cs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/CloudlogHelper/LogService/LoTWThirdPartyLogService.cs b/src/CloudlogHelper/LogService/LoTWThirdPartyLogService.cs
+--- a/src/CloudlogHelper/LogService/LoTWThirdPartyLogService.cs	(revision b0aa63445e8c6fd2264dace938948fee6badb824)
++++ b/src/CloudlogHelper/LogService/LoTWThirdPartyLogService.cs	(revision 07ee1ae2a7e15c9b011de2bf7c6a5dabb08cbfaf)
+@@ -80,7 +80,7 @@
+         throw new Exception($"Upload failed: {result}");
+     }
+ 
+-    public override void PreInitSync()
++    public override async Task PreInitAsync(CancellationToken token)
+     {
+         // find station infos
+         if (Stations is null || Stations.Length == 0)
+@@ -115,7 +115,7 @@
+             // check if file valid
+             if (!string.IsNullOrEmpty(stationDataPath))
+             {
+-                var readAllText = File.ReadAllText(stationDataPath);
++                var readAllText = await File.ReadAllTextAsync(stationDataPath, token);
+                 var doc = XDocument.Parse(readAllText);
+ 
+                 var nameList = doc.Root?.Elements("StationData")
+Index: src/CloudlogHelper/LogService/ThirdPartyLogService.cs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/CloudlogHelper/LogService/ThirdPartyLogService.cs b/src/CloudlogHelper/LogService/ThirdPartyLogService.cs
+--- a/src/CloudlogHelper/LogService/ThirdPartyLogService.cs	(revision b0aa63445e8c6fd2264dace938948fee6badb824)
++++ b/src/CloudlogHelper/LogService/ThirdPartyLogService.cs	(revision 07ee1ae2a7e15c9b011de2bf7c6a5dabb08cbfaf)
+@@ -28,11 +28,11 @@
+     }
+ 
+     /// <summary>
+-    ///     Preinit works. This will be called each time setting window opened!
+-    ///     DON'T DO TIME COSTING WORKS HERE!
++    ///     Preinit works. This will be called on application start.
+     /// </summary>
+     /// <returns></returns>
+-    public virtual void PreInitSync()
++    public virtual Task PreInitAsync(CancellationToken token)
+     {
++        return Task.CompletedTask;
+     }
+ }
+\ No newline at end of file
+Index: src/CloudlogHelper/Resources/DefaultConfigs.cs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/CloudlogHelper/Resources/DefaultConfigs.cs b/src/CloudlogHelper/Resources/DefaultConfigs.cs
+--- a/src/CloudlogHelper/Resources/DefaultConfigs.cs	(revision b0aa63445e8c6fd2264dace938948fee6badb824)
++++ b/src/CloudlogHelper/Resources/DefaultConfigs.cs	(revision 07ee1ae2a7e15c9b011de2bf7c6a5dabb08cbfaf)
+@@ -291,8 +291,8 @@
+ 
+     public const int CLHTCPConnRetryDelayMs = 3000;
+ 
+-    public const int CLHHeartbeatTimeoutS = 16;
+-    public const int CLHHeartbeatIntervalMS = 5000;
++    public const int CLHHeartbeatTimeoutSec = 16;
++    public const int CLHHeartbeatIntervalMilliSec = 5000;
+ 
+     /// <summary>
+     ///     Default timeout (in seconds) for start/stop.
+@@ -324,6 +324,8 @@
+         ApplicationStartUpUtil.GetConfigDir(),
+         "hamlib");
+ 
++    public const int LogServicePreinitTimeoutSec = 5;
++
+     /// <summary>
+     ///     Default World map
+     /// </summary>
+Index: src/CloudlogHelper/Services/CLHServerService.cs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/CloudlogHelper/Services/CLHServerService.cs b/src/CloudlogHelper/Services/CLHServerService.cs
+--- a/src/CloudlogHelper/Services/CLHServerService.cs	(revision b0aa63445e8c6fd2264dace938948fee6badb824)
++++ b/src/CloudlogHelper/Services/CLHServerService.cs	(revision 07ee1ae2a7e15c9b011de2bf7c6a5dabb08cbfaf)
+@@ -238,7 +238,7 @@
+             }
+             finally
+             {
+-                await Task.Delay(DefaultConfigs.CLHHeartbeatIntervalMS, CancellationToken.None);
++                await Task.Delay(DefaultConfigs.CLHHeartbeatIntervalMilliSec, CancellationToken.None);
+             }
+         }
+         ClassLogger.Trace("Send ping loop exited.");
+Index: src/CloudlogHelper/ViewModels/SettingsWindowViewModel.cs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/CloudlogHelper/ViewModels/SettingsWindowViewModel.cs b/src/CloudlogHelper/ViewModels/SettingsWindowViewModel.cs
+--- a/src/CloudlogHelper/ViewModels/SettingsWindowViewModel.cs	(revision b0aa63445e8c6fd2264dace938948fee6badb824)
++++ b/src/CloudlogHelper/ViewModels/SettingsWindowViewModel.cs	(revision 07ee1ae2a7e15c9b011de2bf7c6a5dabb08cbfaf)
+@@ -174,15 +174,6 @@
+ 
+     private async Task _initializeLogSystemsAsync()
+     {
+-        try
+-        {
+-            foreach (var draftSettingsLogService in DraftSettings.LogServices) draftSettingsLogService.PreInitSync();
+-        }
+-        catch (Exception e)
+-        {
+-            ClassLogger.Error(e, "Exception occurred while initializing log systems.");
+-        }
+-
+         foreach (var draftSettingsLogService in DraftSettings.LogServices)
+         {
+             var classAttr = draftSettingsLogService.GetType().GetCustomAttribute<LogServiceAttribute>();
+Index: src/CloudlogHelper/ViewModels/QsoSyncAssistantWindowViewModel.cs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/CloudlogHelper/ViewModels/QsoSyncAssistantWindowViewModel.cs b/src/CloudlogHelper/ViewModels/QsoSyncAssistantWindowViewModel.cs
+--- a/src/CloudlogHelper/ViewModels/QsoSyncAssistantWindowViewModel.cs	(revision 07ee1ae2a7e15c9b011de2bf7c6a5dabb08cbfaf)
++++ b/src/CloudlogHelper/ViewModels/QsoSyncAssistantWindowViewModel.cs	(revision 3fbd86c1ae88dc9264d16e4c09ace55c8a88f23a)
+@@ -206,6 +206,8 @@
+             _logProgress($"{cloudParser.QSOCount} Qsos from cloud parsed successfully.", 30);
+ 
+             var cloudParsed = cloudParser.TheQSOs
++                .AsParallel()
++                .WithCancellation(_source.Token)
+                 .Select(AdifLog.Parse)
+                 .ToList();
+ 
+@@ -237,6 +239,8 @@
+                         CurrentProgress);
+ 
+                     var localParsed = localParser.TheQSOs
++                        .AsParallel()
++                        .WithCancellation(_source.Token)
+                         .Select(AdifLog.Parse)
+                         .ToList();
+ 
