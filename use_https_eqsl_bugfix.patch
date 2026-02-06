@@ -1,0 +1,76 @@
+Subject: [PATCH] use https
+eqsl
+bugfix
+---
+Index: src/CloudlogHelper/LogService/CustomAPIThirdPartyLogService.cs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/CloudlogHelper/LogService/CustomAPIThirdPartyLogService.cs b/src/CloudlogHelper/LogService/CustomAPIThirdPartyLogService.cs
+--- a/src/CloudlogHelper/LogService/CustomAPIThirdPartyLogService.cs	(revision c07272bed2452cb6d131d0c418919f1b3be6b137)
++++ b/src/CloudlogHelper/LogService/CustomAPIThirdPartyLogService.cs	(revision e47f24a77497112c69c39a485168f610b70b4842)
+@@ -50,6 +50,8 @@
+     {
+         if (!AllowUploadRigInfo)return;
+         
++        if (string.IsNullOrWhiteSpace(RIGEndpoint)) return;
++        
+         var payload = new RadioApiCallV2
+         {
+             Radio = rigData.RigName ?? "Unknown",
+Index: src/CloudlogHelper/LogService/EqslThirdPartyLogService.cs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/CloudlogHelper/LogService/EqslThirdPartyLogService.cs b/src/CloudlogHelper/LogService/EqslThirdPartyLogService.cs
+--- a/src/CloudlogHelper/LogService/EqslThirdPartyLogService.cs	(revision e47f24a77497112c69c39a485168f610b70b4842)
++++ b/src/CloudlogHelper/LogService/EqslThirdPartyLogService.cs	(revision 83881f26cbc2494fa556acec8cceac4b92fec40a)
+@@ -1,5 +1,6 @@
+ using System;
+ using System.Diagnostics.CodeAnalysis;
++using System.Net.Http;
+ using System.Text;
+ using System.Threading;
+ using System.Threading.Tasks;
+@@ -64,11 +65,16 @@
+         var adifWithHeader = new StringBuilder(AdifUtil.GenerateHeader());
+         adifWithHeader.AppendLine(adif);
+         
+-        var param =
+-            $"ADIFData={Uri.EscapeDataString(adifWithHeader.ToString())}&EQSL_USER={Uri.EscapeDataString(Username)}&EQSL_PSWD={Uri.EscapeDataString(Password)}";
++        using var formData = new MultipartFormDataContent();
++        var fileContent = new StringContent(adifWithHeader.ToString(), Encoding.UTF8, "text/plain");
++        formData.Add(fileContent, "Filename", "clh-qso.adif");
++        
++        formData.Add(new StringContent(Username ?? ""), "EQSL_USER");
++        formData.Add(new StringContent(Password ?? ""), "EQSL_PSWD");
++        
+         var results = await EqslQsoUploadEndpoint
+-            .AppendQueryParam(param)
+-            .GetAsync(cancellationToken: token).ConfigureAwait(false);
++            .PostAsync(formData, cancellationToken: token)
++            .ConfigureAwait(false);
+         var responseText = await results.GetStringAsync().ConfigureAwait(false);
+         var htmlDoc = new HtmlDocument();
+         htmlDoc.LoadHtml(responseText);
+Index: src/CloudlogHelper/LogService/HRDLogThirdPartyLogService.cs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/CloudlogHelper/LogService/HRDLogThirdPartyLogService.cs b/src/CloudlogHelper/LogService/HRDLogThirdPartyLogService.cs
+--- a/src/CloudlogHelper/LogService/HRDLogThirdPartyLogService.cs	(revision 83881f26cbc2494fa556acec8cceac4b92fec40a)
++++ b/src/CloudlogHelper/LogService/HRDLogThirdPartyLogService.cs	(revision faad4d4dec9cf64859319efb0eaad2a17dbc69c0)
+@@ -15,8 +15,8 @@
+ [LogService("HRDLOG", Description = "HRDLOG Log Service")]
+ public class HRDLogThirdPartyLogService : ThirdPartyLogService
+ {
+-    private const string HRDLOGUploadEndpoint = "http://robot.hrdlog.net/NewEntry.aspx";
+-    private const string HRDLOGOnAirEndpoint = "http://robot.hrdlog.net/OnAir.aspx";
++    private const string HRDLOGUploadEndpoint = "https://robot.hrdlog.net/NewEntry.aspx";
++    private const string HRDLOGOnAirEndpoint = "https://robot.hrdlog.net/OnAir.aspx";
+ 
+     [UserInput("callsign")] public string Callsign { get; set; }
+ 
